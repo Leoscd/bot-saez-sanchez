@@ -1,0 +1,10 @@
+anthropic
+python-telegram-bot[job-queue]>=21,<22
+python-dotenv
+httpx
+fpdf2
+openpyxl
+pillow
+tzdata
+# Transcripción local. En un VPS chico, usar TRANSCRIPCION=groq y no instalar esto.
+faster-whisper
