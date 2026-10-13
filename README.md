@@ -16,13 +16,13 @@ El DT manda fotos y audios del día; el bot arma un reporte estándar vinculado 
 | Archivo | Qué hace |
 |---|---|
 | `obra_bot/telegram_bot.py` | Canal Telegram: texto, audios, fotos, botones y recordatorio de las 18 h |
-| `obra_bot/agente.py` | Conversación con Claude y descripción automática de fotos |
-| `obra_bot/herramientas.py` | Herramientas que usa Claude para cargar el reporte |
+| `obra_bot/agente.py` | Conversación con el modelo de IA (OpenAI o Claude) y descripción automática de fotos |
+| `obra_bot/herramientas.py` | Herramientas que usa el modelo para cargar el reporte |
 | `obra_bot/reporte.py` | Borrador del día, campos faltantes y confirmación |
 | `obra_bot/cronograma.py` | Cronograma, días hábiles, avance previsto y alertas de materiales |
 | `obra_bot/salidas.py` | PDF para el director y filas de la planilla de seguimiento |
 | `obra_bot/clima.py` | Clima del día por ubicación (Open-Meteo) |
-| `obra_bot/transcripcion.py` | Audios a texto (faster-whisper local o Groq) |
+| `obra_bot/transcripcion.py` | Audios a texto (OpenAI, faster-whisper local o Groq) |
 | `scripts/seed_demo.py` | Dos obras demo en Tucumán con cronograma |
 
 ## Estado

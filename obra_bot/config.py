@@ -15,11 +15,18 @@ def _env(nombre: str, default: str = "") -> str:
 
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
 
+# Proveedor del modelo de IA: "openai" o "anthropic"
+LLM_PROVIDER = _env("LLM_PROVIDER", "openai").lower()
+
+OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-5.5")
+OPENAI_REASONING_EFFORT = _env("OPENAI_REASONING_EFFORT", "low")
+OPENAI_TRANSCRIBE_MODEL = _env("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+
 CLAUDE_MODEL = _env("CLAUDE_MODEL", "claude-opus-5-5")
 CLAUDE_EFFORT = _env("CLAUDE_EFFORT", "medium")
 
-# "local" = faster-whisper en esta máquina; "groq" = API de Groq (recomendado en un VPS chico)
-TRANSCRIPCION = _env("TRANSCRIPCION", "local")
+# "openai" = API de OpenAI; "local" = faster-whisper en esta máquina; "groq" = API de Groq
+TRANSCRIPCION = _env("TRANSCRIPCION", "openai" if LLM_PROVIDER == "openai" else "local")
 WHISPER_MODEL = _env("WHISPER_MODEL", "small")
 GROQ_API_KEY = _env("GROQ_API_KEY")
 

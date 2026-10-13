@@ -9,9 +9,11 @@ El bot corre en tu PC (o en el VPS) con *long polling*: no necesita dominio, HTT
 3. Usuario: tiene que terminar en `bot`, por ejemplo `reportes_obra_demo_bot`.
 4. BotFather te da un **token**. Copialo directo al archivo `.env` (paso 3). No lo pegues en chats ni capturas.
 
-## 2. API key de Anthropic
+## 2. API key de OpenAI
 
-En [console.anthropic.com](https://console.anthropic.com) → **API Keys** → crear una key y pegarla en `.env`.
+En [platform.openai.com](https://platform.openai.com) → **API keys** → crear una key y pegarla en `.env` como `OPENAI_API_KEY`. La misma key se usa para el chat, la descripción de fotos y la transcripción de audios. La cuenta necesita saldo cargado (Billing).
+
+Para usar Claude en lugar de OpenAI: `LLM_PROVIDER=anthropic` y `ANTHROPIC_API_KEY`.
 
 ## 3. Instalar y configurar
 
@@ -21,7 +23,7 @@ python -m venv .venv
 copy .env.example .env
 ```
 
-Completá en `.env` al menos `TELEGRAM_BOT_TOKEN` y `ANTHROPIC_API_KEY`.
+Completá en `.env` al menos `TELEGRAM_BOT_TOKEN` y `OPENAI_API_KEY`.
 
 ## 4. Cargar las obras demo y arrancar
 
@@ -30,7 +32,7 @@ Completá en `.env` al menos `TELEGRAM_BOT_TOKEN` y `ANTHROPIC_API_KEY`.
 .venv\Scripts\python main.py
 ```
 
-El seed crea dos obras ficticias en Tucumán con cronogramas fechados alrededor de hoy (volver a correrlo antes de cada demo para que las fechas sigan vigentes). El primer audio tarda más porque se descarga el modelo de transcripción (~460 MB).
+El seed crea dos obras ficticias en Tucumán con cronogramas fechados alrededor de hoy (volver a correrlo antes de cada demo para que las fechas sigan vigentes).
 
 ## 5. Probarlo
 
@@ -56,5 +58,5 @@ Para que el director reciba una copia de cada PDF: que le escriba `/start` al bo
 ## Costos de la demo
 
 - Telegram: gratis.
-- Claude: unos centavos de dólar por reporte (depende de cuántos mensajes y fotos haya).
-- Transcripción local: gratis. En un VPS chico usar `TRANSCRIPCION=groq` con `GROQ_API_KEY`.
+- OpenAI: unos centavos de dólar por reporte (depende de cuántos mensajes, fotos y minutos de audio haya).
+- Transcripción: con OpenAI, fracciones de centavo por minuto de audio. Alternativas: `TRANSCRIPCION=local` (gratis, instalar faster-whisper) o `groq`.

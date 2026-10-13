@@ -1,4 +1,4 @@
-"""Transcripción de audios del DT: faster-whisper local o API de Groq."""
+"""Transcripción de audios del DT: API de OpenAI, faster-whisper local o API de Groq."""
 import asyncio
 from pathlib import Path
 
@@ -31,7 +31,17 @@ async def _groq(path: Path) -> str:
         return r.json()["text"].strip()
 
 
+async def _openai(path: Path) -> str:
+    from openai import AsyncOpenAI
+    with open(path, "rb") as f:
+        r = await AsyncOpenAI().audio.transcriptions.create(
+            model=config.OPENAI_TRANSCRIBE_MODEL, file=f, language="es")
+    return r.text.strip()
+
+
 async def transcribir(path: Path) -> str:
+    if config.TRANSCRIPCION == "openai":
+        return await _openai(path)
     if config.TRANSCRIPCION == "groq":
         return await _groq(path)
     return await asyncio.to_thread(_local, path)

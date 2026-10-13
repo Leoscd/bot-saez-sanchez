@@ -1,19 +1,18 @@
-"""Conversación con Claude: un turno por mensaje del DT, con herramientas sobre el borrador."""
+"""Conversación con el modelo de IA: un turno por mensaje del DT, con herramientas sobre el borrador.
+
+Proveedores: OpenAI (por defecto) o Anthropic, según LLM_PROVIDER en el .env.
+El historial de cada borrador queda en el formato del proveedor con el que se empezó el día.
+"""
 import base64
+import json
 import logging
 from pathlib import Path
-
-import anthropic
 
 from . import config, herramientas
 from .reporte import Borrador
 
 log = logging.getLogger(__name__)
 
-client = anthropic.AsyncAnthropic()
-
-# Fallback del lado del servidor ante rechazos de los clasificadores de seguridad
-MODELOS_CON_FALLBACK = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
 MAX_ITERACIONES = 12
 
 SYSTEM = """Sos el asistente de reportes de obra de un estudio de arquitectura de Tucumán, Argentina. \
@@ -42,30 +41,29 @@ preocupa, qué se necesita). Si devuelve faltantes, pedilos de a poco, primero l
 Estilo: mensajes cortos para leer en el celular, en español rioplatense, en texto plano (sin markdown, sin \
 asteriscos ni numerales; usá guiones para listas). Una pregunta por vez cuando necesitás datos."""
 
+PROMPT_FOTO = (
+    "Foto enviada por el director técnico de una obra. En una o dos oraciones en español, describí qué "
+    "trabajo o elemento muestra y en qué estado está, con vocabulario de obra argentino. Si es un remito o "
+    "factura de materiales, empezá con 'REMITO:' y listá proveedor, número y materiales con cantidad y "
+    "unidad. Solo texto plano."
+)
 
-def _parametros_modelo() -> dict:
-    p = {
-        "model": config.CLAUDE_MODEL,
-        "max_tokens": 16000,
-        "thinking": {"type": "adaptive"},
-        "output_config": {"effort": config.CLAUDE_EFFORT},
-    }
-    if config.CLAUDE_MODEL in MODELOS_CON_FALLBACK:
-        p["betas"] = ["server-side-fallback-2026-07-01"]
-        p["fallbacks"] = "default"
-    return p
-
-
-async def _crear(**kwargs):
-    return await client.beta.messages.create(**_parametros_modelo(), **kwargs)
+MSG_ERROR = "Tuve un problema técnico procesando el mensaje. Probá de nuevo en un rato."
+MSG_RECHAZO = "No pude procesar ese mensaje. ¿Me lo contás de otra forma?"
+MSG_TRABADO = "Me trabé con este mensaje. ¿Me lo repetís más corto?"
+SIN_DESCRIPCION = "(sin descripción automática)"
 
 
-def _texto(resp) -> str:
-    return "\n".join(b.text for b in resp.content if b.type == "text").strip()
+def _ejecutar_herramienta(b: Borrador, nombre: str, args: dict) -> tuple[str, bool]:
+    """Devuelve (resultado, es_error). Los errores vuelven al modelo para que corrija."""
+    try:
+        return herramientas.ejecutar(b, nombre, args), False
+    except Exception as e:
+        log.info("Herramienta %s falló: %s", nombre, e)
+        return f"Error: {e}", True
 
 
-async def turno(b: Borrador, mensaje: str) -> str:
-    """Procesa un mensaje del DT y devuelve la respuesta del asistente. Guarda el historial."""
+def _mensaje_usuario(b: Borrador, mensaje: str) -> str:
     partes = []
     if not b.historial:
         partes.append(herramientas.contexto_del_dia(b))
@@ -75,57 +73,202 @@ async def turno(b: Borrador, mensaje: str) -> str:
         partes.append("[Fotos recibidas desde el último mensaje]\n" + "\n".join(lineas))
         b.datos["fotos_sin_revisar"] = []
     partes.append(f"[{herramientas.hora_actual()}] DT: {mensaje}")
+    return "\n\n".join(partes)
 
-    # El historial solo se agrega al final (nunca se edita), así los bloques de thinking siguen válidos
-    b.historial.append({"role": "user", "content": "\n\n".join(partes)})
 
-    respuesta = ""
+# --- OpenAI -----------------------------------------------------------------
+
+_openai = None
+
+
+def _cliente_openai():
+    global _openai
+    if _openai is None:
+        from openai import AsyncOpenAI
+        _openai = AsyncOpenAI()
+    return _openai
+
+
+TOOLS_OPENAI = [
+    {"type": "function",
+     "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+    for t in herramientas.TOOLS
+]
+
+
+def _params_openai() -> dict:
+    p = {"model": config.OPENAI_MODEL, "max_completion_tokens": 16000}
+    if config.OPENAI_REASONING_EFFORT:
+        p["reasoning_effort"] = config.OPENAI_REASONING_EFFORT
+    return p
+
+
+async def _turno_openai(b: Borrador) -> str:
+    import openai
+
+    for _ in range(MAX_ITERACIONES):
+        try:
+            resp = await _cliente_openai().chat.completions.create(
+                **_params_openai(),
+                messages=[{"role": "system", "content": SYSTEM}, *b.historial],
+                tools=TOOLS_OPENAI,
+            )
+        except openai.RateLimitError:
+            log.warning("Límite de uso de OpenAI alcanzado")
+            return "Estoy con mucha demanda. Probá de nuevo en un minuto."
+        except openai.APIStatusError as e:
+            log.exception("Error de OpenAI: %s", e.status_code)
+            return MSG_ERROR
+        except openai.APIConnectionError:
+            log.exception("Sin conexión con OpenAI")
+            return MSG_ERROR
+
+        choice = resp.choices[0]
+        msg = choice.message
+        if msg.refusal:
+            return MSG_RECHAZO
+
+        asistente = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            asistente["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ]
+        b.historial.append(asistente)
+
+        if not msg.tool_calls:
+            return (msg.content or "").strip()
+
+        for tc in msg.tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                resultado = "Error: argumentos JSON inválidos, reintentá la llamada."
+            else:
+                resultado, _ = _ejecutar_herramienta(b, tc.function.name, args)
+            b.historial.append({"role": "tool", "tool_call_id": tc.id, "content": resultado})
+    return MSG_TRABADO
+
+
+async def _foto_openai(datos_b64: str) -> str:
+    import openai
+    try:
+        resp = await _cliente_openai().chat.completions.create(
+            model=config.OPENAI_MODEL,
+            max_completion_tokens=4000,
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{datos_b64}"}},
+                {"type": "text", "text": PROMPT_FOTO},
+            ]}],
+        )
+    except openai.APIError:
+        log.exception("No se pudo describir la foto")
+        return SIN_DESCRIPCION
+    msg = resp.choices[0].message
+    return (msg.content or "").strip() if not msg.refusal else SIN_DESCRIPCION
+
+
+# --- Anthropic --------------------------------------------------------------
+
+_anthropic = None
+MODELOS_CON_FALLBACK = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
+
+
+def _cliente_anthropic():
+    global _anthropic
+    if _anthropic is None:
+        import anthropic
+        _anthropic = anthropic.AsyncAnthropic()
+    return _anthropic
+
+
+def _params_anthropic(effort: str | None = None) -> dict:
+    p = {
+        "model": config.CLAUDE_MODEL,
+        "max_tokens": 16000,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": effort or config.CLAUDE_EFFORT},
+    }
+    if config.CLAUDE_MODEL in MODELOS_CON_FALLBACK:
+        # Fallback del lado del servidor ante rechazos de los clasificadores de seguridad
+        p["betas"] = ["server-side-fallback-2026-07-01"]
+        p["fallbacks"] = "default"
+    return p
+
+
+def _texto_anthropic(resp) -> str:
+    return "\n".join(blk.text for blk in resp.content if blk.type == "text").strip()
+
+
+async def _turno_anthropic(b: Borrador) -> str:
+    import anthropic
+
     for i in range(MAX_ITERACIONES):
         try:
-            resp = await _crear(system=SYSTEM, tools=herramientas.TOOLS, messages=b.historial)
+            resp = await _cliente_anthropic().beta.messages.create(
+                **_params_anthropic(), system=SYSTEM, tools=herramientas.TOOLS, messages=b.historial)
         except anthropic.RateLimitError:
-            log.warning("Límite de uso de la API alcanzado")
-            respuesta = "Estoy con mucha demanda. Probá de nuevo en un minuto."
-            break
+            log.warning("Límite de uso de Anthropic alcanzado")
+            return "Estoy con mucha demanda. Probá de nuevo en un minuto."
         except anthropic.APIStatusError as e:
-            log.exception("Error de la API: %s", e.status_code)
-            respuesta = "Tuve un problema técnico procesando el mensaje. Probá de nuevo."
-            break
+            log.exception("Error de Anthropic: %s", e.status_code)
+            return MSG_ERROR
         except anthropic.APIConnectionError:
-            log.exception("Sin conexión con la API")
-            respuesta = "No tengo conexión en este momento. Probá de nuevo en un rato."
-            break
+            log.exception("Sin conexión con Anthropic")
+            return MSG_ERROR
 
         if resp.stop_reason == "refusal":
             if i == 0:
                 b.historial.pop()
-            respuesta = "No pude procesar ese mensaje. ¿Me lo contás de otra forma?"
-            break
+            return MSG_RECHAZO
 
+        # El historial solo se agrega al final, así los bloques de thinking siguen siendo válidos
         b.historial.append({
             "role": "assistant",
             "content": [blk.model_dump(mode="json", exclude_none=True) for blk in resp.content],
         })
-
         if resp.stop_reason != "tool_use":
-            respuesta = _texto(resp)
-            break
+            return _texto_anthropic(resp)
 
         resultados = []
         for blk in resp.content:
-            if blk.type != "tool_use":
-                continue
-            try:
-                salida = herramientas.ejecutar(b, blk.name, dict(blk.input))
-                resultados.append({"type": "tool_result", "tool_use_id": blk.id, "content": salida})
-            except Exception as e:  # el error vuelve a Claude para que corrija
-                log.info("Herramienta %s falló: %s", blk.name, e)
-                resultados.append({"type": "tool_result", "tool_use_id": blk.id,
-                                   "content": f"Error: {e}", "is_error": True})
+            if blk.type == "tool_use":
+                salida, es_error = _ejecutar_herramienta(b, blk.name, dict(blk.input))
+                r = {"type": "tool_result", "tool_use_id": blk.id, "content": salida}
+                if es_error:
+                    r["is_error"] = True
+                resultados.append(r)
         b.historial.append({"role": "user", "content": resultados})
-    else:
-        respuesta = "Me trabé con este mensaje. ¿Me lo repetís más corto?"
+    return MSG_TRABADO
 
+
+async def _foto_anthropic(datos_b64: str) -> str:
+    import anthropic
+    try:
+        resp = await _cliente_anthropic().beta.messages.create(
+            **_params_anthropic(effort="low"),
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": datos_b64}},
+                {"type": "text", "text": PROMPT_FOTO},
+            ]}],
+        )
+    except anthropic.APIError:
+        log.exception("No se pudo describir la foto")
+        return SIN_DESCRIPCION
+    return _texto_anthropic(resp) if resp.stop_reason != "refusal" else SIN_DESCRIPCION
+
+
+# --- interfaz común -----------------------------------------------------------
+
+async def turno(b: Borrador, mensaje: str) -> str:
+    """Procesa un mensaje del DT y devuelve la respuesta del asistente. Guarda el historial."""
+    b.datos.setdefault("proveedor", config.LLM_PROVIDER)
+    b.historial.append({"role": "user", "content": _mensaje_usuario(b, mensaje)})
+    if b.datos["proveedor"] == "anthropic":
+        respuesta = await _turno_anthropic(b)
+    else:
+        respuesta = await _turno_openai(b)
     b.guardar()
     return respuesta or "Listo."
 
@@ -133,27 +276,8 @@ async def turno(b: Borrador, mensaje: str) -> str:
 async def describir_foto(path: Path) -> str:
     """Descripción breve de una foto de obra; si es un remito, extrae sus datos."""
     datos = base64.standard_b64encode(path.read_bytes()).decode()
-    params = _parametros_modelo()
-    params["output_config"] = {"effort": "low"}
-    try:
-        resp = await client.beta.messages.create(
-            **params,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": datos}},
-                    {"type": "text", "text": (
-                        "Foto enviada por el director técnico de una obra. En una o dos oraciones en español, "
-                        "describí qué trabajo o elemento muestra y en qué estado está, con vocabulario de obra "
-                        "argentino. Si es un remito o factura de materiales, empezá con 'REMITO:' y listá "
-                        "proveedor, número y materiales con cantidad y unidad. Solo texto plano."
-                    )},
-                ],
-            }],
-        )
-    except anthropic.APIError:
-        log.exception("No se pudo describir la foto")
-        return "(sin descripción automática)"
-    if resp.stop_reason == "refusal":
-        return "(sin descripción automática)"
-    return _texto(resp) or "(sin descripción automática)"
+    if config.LLM_PROVIDER == "anthropic":
+        texto = await _foto_anthropic(datos)
+    else:
+        texto = await _foto_openai(datos)
+    return texto or SIN_DESCRIPCION

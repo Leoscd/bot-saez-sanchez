@@ -173,7 +173,7 @@ El sistema vive en un VPS y el núcleo no depende del canal. El piloto corre en 
 
 - El canal de chat avisa cada mensaje a una URL pública con HTTPS, que tiene que estar encendida las 24 h.
 - Corre las tareas programadas: aviso de cierre a las 18 h, pedidos del lunes y recordatorios de notas.
-- Transcribe los audios en el propio servidor (faster-whisper), sin costo por minuto.
+- Transcribe los audios con la API de OpenAI (fracciones de centavo por minuto), sin cargar el servidor; o en el propio servidor con faster-whisper si tiene recursos.
 - Guarda fotos, PDFs y la base de datos con control del estudio, lo que protege la confidencialidad de la información de obra.
 - Tamaño de partida: 2 vCPU, 4 GB de RAM y 80 GB de disco (aproximado; depende de cuántas obras y fotos haya).
 
