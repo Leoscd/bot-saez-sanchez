@@ -61,6 +61,10 @@ El bot escucha solo en `127.0.0.1:8085`. Meta exige HTTPS, así que hace falta a
 
 - **Con Tailscale Funnel:** `tailscale funnel --bg --https=10000 http://127.0.0.1:8085`. La URL queda
   `https://<nombre-del-vps>.ts.net:10000/whatsapp/webhook`. Funnel solo permite los puertos 443, 8443 y 10000.
+  Si el puerto ya publica otra cosa, el bot va en una ruta propia:
+  `tailscale funnel --bg --https=10000 --set-path=/whatsapp http://127.0.0.1:8085`. Funnel le saca el
+  `/whatsapp` antes de pasar el pedido, así que en el `.env` va `WHATSAPP_RUTA=/webhook`. La URL para Meta
+  sigue siendo `https://<nombre-del-vps>.ts.net:10000/whatsapp/webhook`.
 - **Con Caddy y un dominio:** `bot.dominio.com { reverse_proxy 127.0.0.1:8085 }`. La URL queda
   `https://bot.dominio.com/whatsapp/webhook`.
 
