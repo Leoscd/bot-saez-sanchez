@@ -1,7 +1,9 @@
 """Crea dos obras ficticias en Tucumán con cronogramas fechados alrededor de hoy.
 
-Uso: python scripts/seed_demo.py
+Uso: python scripts/seed_demo.py [--historial]
 Volver a correrlo regenera los cronogramas con fechas relativas al día en que se ejecuta.
+Con --historial también carga reportes, notas, pedidos y fotos de días anteriores, para mostrar
+la consulta "estoy haciendo un reemplazo, contame cómo viene la obra".
 """
 import csv
 import json
@@ -11,7 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from obra_bot import config  # noqa: E402
+from PIL import Image, ImageDraw  # noqa: E402
+
+from obra_bot import config, cronograma, db, obras, reporte  # noqa: E402
 
 COLUMNAS = ["id_tarea", "rubro", "tarea", "inicio", "fin", "predecesoras", "critica",
             "material", "cantidad", "unidad", "proveedor", "plazo_entrega_dias"]
@@ -82,6 +86,133 @@ def escribir_cronograma(path: Path, tareas, hoy: date):
                 w.writerow(base + [mat, cant, unidad, prov, plazo])
 
 
+# --- historial demo -----------------------------------------------------------
+
+# Reportes de los últimos días hábiles, del más viejo al más nuevo:
+# (resumen, jornada, personal [(empresa, categoría, cantidad)], avances {id_tarea: (% real, descripción)},
+#  faltantes [(material, cantidad, unidad)], hys, fotos [(id_tarea, descripción)])
+HISTORIAL = {
+    "casa-lomas": ("demo:martin", "Martín Gómez (demo)", [
+        ("Se terminó la capa aisladora y arrancó la mampostería de planta baja por el frente.",
+         {"tipo": "completa"}, [("Hnos. Díaz", "oficial", 2), ("Hnos. Díaz", "ayudante", 3)],
+         {"T-045": (100, "Capa aisladora terminada en todo el perímetro"),
+          "T-040": (12, "Primeras hiladas del frente")},
+         [], {"epp_ok": True},
+         [("T-045", "Capa aisladora horizontal terminada sobre viga de fundación"),
+          ("T-040", "Primeras hiladas de ladrillo hueco en el frente")]),
+        ("Mampostería del frente y medianera oeste. Quedan 400 ladrillos: pedir.",
+         {"tipo": "completa"}, [("Hnos. Díaz", "oficial", 2), ("Hnos. Díaz", "ayudante", 3)],
+         {"T-040": (22, "Frente a 1,20 m y medianera oeste empezada")},
+         [], {"epp_ok": True}, [("T-040", "Medianera oeste a media altura")]),
+        ("Lluvia a la mañana, se trabajó desde las 11. Se pidió ladrillo al corralón, entrega prometida para ayer.",
+         {"tipo": "parcial", "horas_perdidas": 3, "causa": "lluvia"},
+         [("Hnos. Díaz", "oficial", 2), ("Hnos. Díaz", "ayudante", 2)],
+         {"T-040": (28, "Medianera oeste a 1,80 m")},
+         [], {"epp_ok": True, "visitas": "Visita de la ART: sin observaciones"}, []),
+        ("Sin ladrillos desde el mediodía: el corralón no entregó. Se adelantó limpieza y acopio.",
+         {"tipo": "parcial", "horas_perdidas": 4, "causa": "falta de material"},
+         [("Hnos. Díaz", "oficial", 2), ("Hnos. Díaz", "ayudante", 3)],
+         {"T-040": (33, "Tabique de baño y cocina a 1 m")},
+         [("Ladrillo cerámico hueco 18x18x33", 1800, "u")], {"epp_ok": True},
+         [("T-040", "Tabiques de baño y cocina a un metro de altura")]),
+        ("Llegó parte del ladrillo (1000 u). Se retomó mampostería del contrafrente. El comitente pidió mover una ventana.",
+         {"tipo": "completa"}, [("Hnos. Díaz", "oficial", 3), ("Hnos. Díaz", "ayudante", 3)],
+         {"T-040": (40, "Contrafrente a 1,50 m, faltan dinteles")},
+         [], {"epp_ok": True}, [("T-040", "Contrafrente con vano de ventana del dormitorio 2")]),
+    ]),
+    "local-mate-de-luna": ("demo:lucia", "Lucía Ferreyra (demo)", [
+        ("Canalización de la pared del salón y bandeja del depósito.",
+         {"tipo": "completa"}, [("Eléctrica Norte", "oficial especializado", 1), ("Eléctrica Norte", "ayudante", 1)],
+         {"L-020": (40, "Canalización salón terminada")}, [], {"epp_ok": True},
+         [("L-020", "Cañerías embutidas en pared del salón")]),
+        ("Cableado de circuitos de iluminación del salón.",
+         {"tipo": "completa"}, [("Eléctrica Norte", "oficial especializado", 1), ("Eléctrica Norte", "ayudante", 2)],
+         {"L-020": (55, "Iluminación del salón cableada")}, [], {"epp_ok": True}, []),
+        ("Tablero seccional montado. Falta cablear tomas del depósito.",
+         {"tipo": "completa"}, [("Eléctrica Norte", "oficial especializado", 1), ("Eléctrica Norte", "ayudante", 2)],
+         {"L-020": (68, "Tablero seccional montado")}, [], {"epp_ok": True},
+         [("L-020", "Tablero seccional montado y rotulado")]),
+    ]),
+}
+
+
+def _foto_demo(path: Path, texto: str):
+    img = Image.new("RGB", (800, 600), (196, 180, 160))
+    dibujo = ImageDraw.Draw(img)
+    dibujo.rectangle((40, 40, 760, 560), outline=(90, 70, 50), width=6)
+    dibujo.text((70, 280), f"FOTO DEMO\n{texto}", fill=(40, 30, 20))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path, "JPEG")
+
+
+def sembrar_historial(hoy: date):
+    db.inicializar()
+    with db.conexion() as con:
+        ids = [r["id"] for r in con.execute("SELECT id FROM reportes WHERE dt_id LIKE 'demo:%'")]
+        marcas = ",".join("?" * len(ids))
+        if ids:
+            con.execute(f"DELETE FROM fotos WHERE reporte_id IN ({marcas})", ids)
+            con.execute(f"DELETE FROM notas WHERE reporte_id IN ({marcas})", ids)
+        con.execute("DELETE FROM reportes WHERE dt_id LIKE 'demo:%'")
+        for tabla in ("avance_tareas", "pedidos", "stock"):
+            con.execute(f"DELETE FROM {tabla} WHERE obra_id IN ('casa-lomas', 'local-mate-de-luna')")
+
+    for obra_id, (dt_id, dt_nombre, dias) in HISTORIAL.items():
+        tareas = obras.obtener(obra_id).tareas
+        fechas = []
+        d = hoy
+        for _ in dias:
+            d = cronograma.restar_habiles(d, 1)
+            fechas.insert(0, d)
+        tareas_previas = {"casa-lomas": ["T-010", "T-020", "T-030"], "local-mate-de-luna": ["L-010"]}[obra_id]
+        for tid in tareas_previas:
+            db.guardar_avance(obra_id, tid, cronograma.restar_habiles(fechas[0], 1).isoformat(), 100)
+
+        for numero, (fecha, (resumen, jornada, personal, avances, faltantes, hys, fotos)) in \
+                enumerate(zip(fechas, dias), start=1):
+            datos = reporte.datos_iniciales()
+            datos.update({
+                "condiciones": {"clima_manana": "nublado" if jornada.get("causa") == "lluvia" else "soleado",
+                                "clima_tarde": "soleado", "terreno": "seco", "confirmado": True},
+                "jornada": jornada,
+                "personal": [{"empresa": e, "categoria": c, "cantidad": n, "horas": 8} for e, c, n in personal],
+                "avances": [{"id_tarea": t, "tarea": tareas[t].nombre, "rubro": tareas[t].rubro,
+                             "descripcion": desc, "pct_real": pct,
+                             "pct_previsto": cronograma.pct_previsto(tareas[t], fecha),
+                             "desvio": round(pct - cronograma.pct_previsto(tareas[t], fecha), 1)}
+                            for t, (pct, desc) in avances.items()],
+                "materiales": {"ingresos": [], "stock": [], "faltantes": [
+                    {"tipo": "faltante", "material": m, "cantidad": c, "unidad": u} for m, c, u in faltantes]},
+                "hys": hys, "resumen": resumen, "listo": True, "proveedor": config.LLM_PROVIDER,
+            })
+            rid = db.crear_reporte(obra_id, fecha.isoformat(), dt_id, dt_nombre, dt_id, datos)
+            db.actualizar_reporte(rid, "confirmado", numero, datos, [])
+            for tid, (pct, _) in avances.items():
+                db.guardar_avance(obra_id, tid, fecha.isoformat(), pct)
+            for i, (tid, desc) in enumerate(fotos, start=1):
+                path = config.FOTOS_DIR / obra_id / fecha.isoformat() / f"demo_{i}.jpg"
+                _foto_demo(path, f"{fecha.isoformat()} - {desc}")
+                fid = db.agregar_foto(rid, str(path), "12:00", desc)
+                db.vincular_foto(fid, rid, tid, desc)
+        ultimo_reporte = rid
+
+        if obra_id == "casa-lomas":
+            db.crear_nota(obra_id, "nota_de_pedido", fechas[-1].isoformat(), "Comitente (Sr. Pérez)", dt_nombre,
+                          "Cambio de ubicación de ventana del dormitorio 2",
+                          "Solicito desplazar 60 cm hacia el placard la ventana del dormitorio 2, manteniendo "
+                          "las medidas del vano. Aguardo confirmación de costo y plazo.",
+                          (hoy + timedelta(days=3)).isoformat(), False, ultimo_reporte)
+            db.crear_nota(obra_id, "orden_de_servicio", fechas[-3].isoformat(), dt_nombre, "Hnos. Díaz",
+                          "Dinteles en vanos del contrafrente",
+                          "Ejecutar dinteles de H°A° en los vanos del contrafrente antes de continuar la "
+                          "mampostería por encima de 2,00 m.", (hoy - timedelta(days=1)).isoformat(), False,
+                          ultimo_reporte)
+            db.guardar_pedido(obra_id, "T-040", "Ladrillo cerámico hueco 18x18x33", "pedido",
+                              fechas[2].isoformat(), fechas[3].isoformat())
+            db.guardar_pedido(obra_id, "T-070", "Hierro aletado 8 mm", "pendiente", fechas[-1].isoformat(), None)
+    print("Listo: historial demo cargado (reportes, notas, pedidos y fotos de días anteriores)")
+
+
 def main():
     hoy = date.today()
     obras_json = []
@@ -90,6 +221,8 @@ def main():
         obras_json.append({k: v for k, v in o.items() if k != "tareas"})
     config.OBRAS_FILE.write_text(json.dumps(obras_json, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Listo: {len(OBRAS)} obras demo en {config.OBRAS_FILE}")
+    if "--historial" in sys.argv:
+        sembrar_historial(hoy)
 
 
 if __name__ == "__main__":

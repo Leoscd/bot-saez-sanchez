@@ -33,6 +33,20 @@ GROQ_API_KEY = _env("GROQ_API_KEY")
 # Chat de Telegram del director de proyectos: recibe una copia de cada PDF (opcional)
 DIRECTOR_CHAT_ID = _env("DIRECTOR_CHAT_ID")
 
+# WhatsApp Cloud API (developers.facebook.com > tu app > WhatsApp)
+WHATSAPP_TOKEN = _env("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = _env("WHATSAPP_PHONE_NUMBER_ID")
+WHATSAPP_APP_SECRET = _env("WHATSAPP_APP_SECRET")
+WHATSAPP_VERIFY_TOKEN = _env("WHATSAPP_VERIFY_TOKEN")
+WHATSAPP_API_VERSION = _env("WHATSAPP_API_VERSION", "v25.0")
+WHATSAPP_API_URL = _env("WHATSAPP_API_URL", "https://graph.facebook.com")
+WHATSAPP_PUERTO = int(_env("WHATSAPP_PUERTO", "8085"))
+WHATSAPP_RUTA = _env("WHATSAPP_RUTA", "/whatsapp/webhook")
+# Plantilla aprobada para el recordatorio cuando pasaron más de 24 h del último mensaje del DT (opcional)
+WHATSAPP_PLANTILLA_RECORDATORIO = _env("WHATSAPP_PLANTILLA_RECORDATORIO")
+# Teléfono del director de proyectos: recibe una copia de cada PDF (opcional)
+WHATSAPP_DIRECTOR = _env("WHATSAPP_DIRECTOR")
+
 HORA_RECORDATORIO = _env("HORA_RECORDATORIO", "18:00")
 TZ = ZoneInfo(_env("TZ_OBRA", "America/Argentina/Tucuman"))
 MIN_FOTOS = int(_env("MIN_FOTOS", "3"))
@@ -41,6 +55,7 @@ MARGEN_PEDIDO_DIAS = int(_env("MARGEN_PEDIDO_DIAS", "2"))
 DATA_DIR = BASE_DIR / _env("DATA_DIR", "data")
 DB_PATH = DATA_DIR / "obra_report.db"
 OBRAS_FILE = DATA_DIR / "obras.json"
+EQUIPO_FILE = DATA_DIR / "equipo.json"
 FOTOS_DIR = DATA_DIR / "fotos"
 AUDIOS_DIR = DATA_DIR / "audios"
 SALIDAS_DIR = DATA_DIR / "salidas"

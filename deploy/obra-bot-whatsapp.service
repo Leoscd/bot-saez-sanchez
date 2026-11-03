@@ -1,0 +1,18 @@
+# Servicio del bot de WhatsApp. Copiar a /etc/systemd/system/ y activar con:
+#   systemctl daemon-reload && systemctl enable --now obra-bot-whatsapp
+# Ver el registro: journalctl -u obra-bot-whatsapp -f
+[Unit]
+Description=Bot de reporte diario de obra por WhatsApp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/obra-bot
+ExecStart=/opt/obra-bot/.venv/bin/python main.py whatsapp
+Restart=always
+RestartSec=5
+User=obrabot
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

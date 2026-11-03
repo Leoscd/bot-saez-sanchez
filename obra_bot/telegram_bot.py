@@ -1,27 +1,19 @@
 """Canal Telegram: recibe texto, audios y fotos del DT y los pasa al asistente."""
 import logging
-from datetime import datetime, time
+from datetime import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message, Update
 from telegram.constants import ChatAction
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, filters)
 
-from . import agente, clima, config, db, obras, reporte, transcripcion
+from . import config, db, nucleo, obras, reporte
 
 log = logging.getLogger(__name__)
 
-AYUDA = (
-    "Soy el asistente de reportes de obra.\n\n"
-    "- Mandame fotos, audios o texto con lo que pasa en la obra durante el día.\n"
-    "- Preguntame qué hay hoy en el cronograma o qué materiales hay que pedir.\n"
-    "- Cuando termines, escribí \"cerrar\" o usá /cerrar.\n\n"
-    "Comandos: /obra cambiar de obra, /hoy tareas del día, /alertas materiales a pedir, /cerrar cerrar el reporte."
+AYUDA = nucleo.AYUDA + (
+    "\n\nComandos: /obra cambiar de obra, /hoy tareas del día, /alertas materiales a pedir, /cerrar cerrar el reporte."
 )
-
-
-def _hoy():
-    return datetime.now(config.TZ).date()
 
 
 async def _enviar(msg: Message, texto: str, **kwargs):
@@ -37,36 +29,27 @@ def _teclado_obras() -> InlineKeyboardMarkup:
 async def _borrador(update: Update, context: ContextTypes.DEFAULT_TYPE) -> reporte.Borrador | None:
     """Borrador de hoy del DT. Si todavía no eligió obra hoy, la pide y devuelve None."""
     u = update.effective_user
-    db.guardar_usuario(u.id, u.full_name, update.effective_chat.id)
-    usuario = db.obtener_usuario(u.id)
-    hoy = _hoy()
-    if usuario["obra_fecha"] != hoy.isoformat() or not obras.obtener(usuario["obra_id"] or ""):
+    b = await nucleo.borrador(u.id, u.full_name, update.effective_chat.id)
+    if b is None:
         context.user_data.setdefault("pendientes", []).append(update.effective_message)
         await update.effective_message.reply_text("¿De qué obra es?", reply_markup=_teclado_obras())
-        return None
-    obra = obras.obtener(usuario["obra_id"])
-    b, nuevo = reporte.obtener_o_crear(obra, hoy, u.id, u.full_name, update.effective_chat.id)
-    if nuevo:
-        b.datos["condiciones"]["propuesto"] = await clima.del_dia(obra.lat, obra.lon, hoy)
-        b.guardar()
     return b
 
 
 async def _turno(msg: Message, context: ContextTypes.DEFAULT_TYPE, b: reporte.Borrador, texto: str):
-    if b.estado == "confirmado":
-        await msg.reply_text("El reporte de hoy ya está confirmado. Lo que mandes ahora no se agrega.")
-        return
     await context.bot.send_chat_action(msg.chat_id, ChatAction.TYPING)
-    estaba_listo = b.datos.get("listo")
-    respuesta = await agente.turno(b, texto)
-    if b.datos.get("listo") and not estaba_listo:
+    r = await nucleo.turno(b, texto)
+    if r.pedir_confirmacion:
         botones = InlineKeyboardMarkup([[
             InlineKeyboardButton("Confirmar y enviar", callback_data=f"conf:{b.id}"),
             InlineKeyboardButton("Corregir algo", callback_data=f"corr:{b.id}"),
         ]])
-        await _enviar(msg, respuesta, reply_markup=botones)
+        await _enviar(msg, r.texto, reply_markup=botones)
     else:
-        await _enviar(msg, respuesta)
+        await _enviar(msg, r.texto)
+    if r.fotos:
+        await context.bot.send_chat_action(msg.chat_id, ChatAction.UPLOAD_PHOTO)
+        await msg.reply_media_group([InputMediaPhoto(p.read_bytes()) for p in r.fotos])
 
 
 # --- procesamiento por tipo de mensaje ----------------------------------------
@@ -82,7 +65,7 @@ async def _procesar(update: Update, context: ContextTypes.DEFAULT_TYPE, msg: Mes
         destino = config.AUDIOS_DIR / f"{b.id}_{msg.message_id}.ogg"
         await archivo.download_to_drive(destino)
         try:
-            texto = await transcripcion.transcribir(destino)
+            texto = await nucleo.transcribir(destino)
         except Exception:
             log.exception("Falló la transcripción")
             await msg.reply_text("No pude transcribir el audio. ¿Me lo mandás de nuevo o por texto?")
@@ -96,16 +79,10 @@ async def _procesar(update: Update, context: ContextTypes.DEFAULT_TYPE, msg: Mes
     elif msg.photo:
         await context.bot.send_chat_action(msg.chat_id, ChatAction.UPLOAD_PHOTO)
         archivo = await msg.photo[-1].get_file()
-        carpeta = config.FOTOS_DIR / b.obra.id / b.fecha.isoformat()
-        carpeta.mkdir(parents=True, exist_ok=True)
-        destino = carpeta / f"{msg.message_id}.jpg"
+        destino = nucleo.carpeta_fotos(b) / f"{msg.message_id}.jpg"
         await archivo.download_to_drive(destino)
-        descripcion = await agente.describir_foto(destino)
         hora = msg.date.astimezone(config.TZ).strftime("%H:%M")
-        foto_id = db.agregar_foto(b.id, str(destino), hora, descripcion)
-        b.datos.setdefault("fotos_sin_revisar", []).append(
-            {"id": foto_id, "hora": hora, "descripcion": descripcion})
-        b.guardar()
+        foto_id, descripcion = await nucleo.guardar_foto(b, destino, hora)
         if msg.caption:
             await _turno(msg, context, b, f"(foto #{foto_id} con texto) {msg.caption}")
         else:
@@ -152,29 +129,26 @@ async def on_boton(update: Update, context: ContextTypes.DEFAULT_TYPE):
     accion, valor = q.data.split(":", 1)
 
     if accion == "obra":
-        obra = obras.obtener(valor)
-        db.guardar_usuario(q.from_user.id, q.from_user.full_name, q.message.chat_id)
-        db.fijar_obra(q.from_user.id, obra.id, _hoy().isoformat())
+        obra = nucleo.elegir_obra(q.from_user.id, q.from_user.full_name, q.message.chat_id, valor)
         await q.edit_message_text(f"Obra de hoy: {obra.nombre}")
         pendientes = context.user_data.pop("pendientes", [])
         for msg in pendientes:
             await _procesar(update, context, msg)
         if not pendientes:
-            await q.message.reply_text("Listo. Mandame fotos, audios o preguntame qué hay hoy en el cronograma.")
+            await q.message.reply_text(nucleo.LISTO_OBRA)
         return
 
     b = reporte.Borrador.desde_fila(db.obtener_reporte_por_id(int(valor)))
     if b.dt_id != q.from_user.id:
         return
     if accion == "corr":
-        b.datos["listo"] = False
-        b.guardar()
+        nucleo.corregir(b)
         await q.edit_message_reply_markup(None)
         await q.message.reply_text("Decime qué hay que corregir.")
     elif accion == "conf" and b.estado != "confirmado":
         await q.edit_message_reply_markup(None)
         await context.bot.send_chat_action(q.message.chat_id, ChatAction.UPLOAD_DOCUMENT)
-        pdf = reporte.confirmar(b)
+        pdf = nucleo.confirmar(b)
         with open(pdf, "rb") as f:
             await q.message.reply_document(f, filename=pdf.name,
                                            caption=f"Reporte N° {b.numero} confirmado y cargado en la planilla.")
@@ -188,13 +162,9 @@ async def on_boton(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- recordatorio ---------------------------------------------------------
 
 async def recordatorio(context: ContextTypes.DEFAULT_TYPE):
-    for fila in db.borradores_abiertos(_hoy().isoformat()):
-        b = reporte.Borrador.desde_fila(fila)
-        await context.bot.send_message(
-            b.chat_id,
-            f"Recordatorio: el reporte de hoy de {b.obra.nombre} sigue abierto. "
-            "Escribí \"cerrar\" cuando quieras y te digo qué falta.",
-        )
+    for b in nucleo.para_recordar():
+        if isinstance(b.chat_id, int):  # los borradores de WhatsApp los recuerda su canal
+            await context.bot.send_message(b.chat_id, nucleo.texto_recordatorio(b))
 
 
 def crear_app() -> Application:

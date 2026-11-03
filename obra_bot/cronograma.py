@@ -105,7 +105,7 @@ def avance_obra(obra_id: str, tareas: dict[str, Tarea], dia: date) -> tuple[floa
     return round(real, 1), round(previsto, 1)
 
 
-def _normalizar(texto: str) -> list[str]:
+def normalizar(texto: str) -> list[str]:
     texto = unicodedata.normalize("NFKD", texto.lower())
     texto = "".join(c for c in texto if not unicodedata.combining(c))
     return [p for p in re.findall(r"[a-z0-9°]+", texto) if len(p) > 2]
@@ -113,10 +113,10 @@ def _normalizar(texto: str) -> list[str]:
 
 def buscar(tareas: dict[str, Tarea], texto: str, dia: date) -> list[Tarea]:
     """Tareas cuyo nombre o rubro comparte palabras con el texto. Prioriza las activas cerca del día."""
-    palabras = set(_normalizar(texto))
+    palabras = set(normalizar(texto))
     puntajes = []
     for t in tareas.values():
-        comunes = palabras & set(_normalizar(f"{t.nombre} {t.rubro}"))
+        comunes = palabras & set(normalizar(f"{t.nombre} {t.rubro}"))
         if comunes:
             cercania = 1 if t.inicio - timedelta(days=7) <= dia <= t.fin + timedelta(days=7) else 0
             puntajes.append((len(comunes) + cercania, t))

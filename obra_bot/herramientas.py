@@ -1,12 +1,21 @@
-"""Herramientas que Claude usa para cargar el reporte. Cada una modifica el borrador o consulta datos."""
+"""Herramientas que usa el modelo: cargar el reporte del día y consultar cómo viene la obra."""
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from . import config, cronograma, db
 from .reporte import Borrador, faltantes, proximos_pasos
 
 CATEGORIAS_UOCRA = ["oficial especializado", "oficial", "medio oficial", "ayudante", "sereno", "otro"]
 TIPOS_NOTA = ["orden_de_servicio", "nota_de_pedido", "observacion_dt", "comunicacion_comitente", "acta"]
+
+# Con el reporte del día ya confirmado solo se puede consultar (y actualizar pedidos, que son de la obra)
+PERMITIDAS_CONFIRMADO = {
+    "consultar_cronograma", "buscar_tarea", "alertas_materiales", "registrar_pedido", "ver_borrador",
+    "resumen_obra", "ultimos_reportes", "notas_abiertas", "pedidos_pendientes", "fotos_recientes",
+    "enviar_fotos", "buscar_en_reportes",
+}
+MAX_FOTOS_POR_ENVIO = 5
 
 
 def _obj(props: dict, requeridos: list[str]) -> dict:
@@ -148,6 +157,53 @@ TOOLS = [
             "resumen": {"type": "string", "description": "3 líneas: qué se hizo, qué preocupa, qué se necesita"},
         }, ["resumen"]),
     },
+    # --- consultas sobre la obra (no modifican el reporte) ---
+    {
+        "name": "resumen_obra",
+        "description": "Estado general de la obra a hoy: avance real contra previsto, tareas atrasadas, "
+                       "en curso y próximas, último reporte y cantidad de notas y alertas abiertas. "
+                       "Es lo primero para contarle a alguien cómo viene la obra.",
+        "input_schema": _obj({}, []),
+    },
+    {
+        "name": "ultimos_reportes",
+        "description": "Últimos reportes diarios de la obra (sin contar el borrador actual): fecha, DT, "
+                       "resumen, jornada, avances, faltantes de material e incidentes.",
+        "input_schema": _obj({"cantidad": {"type": "integer", "description": "1 a 10; por defecto 5"}}, []),
+    },
+    {
+        "name": "notas_abiertas",
+        "description": "Órdenes de servicio, notas de pedido y demás notas de obra sin cerrar, con su texto "
+                       "y plazo de respuesta.",
+        "input_schema": _obj({}, []),
+    },
+    {
+        "name": "pedidos_pendientes",
+        "description": "Materiales pedidos que todavía no llegaron y materiales que hay que pedir según el "
+                       "cronograma.",
+        "input_schema": _obj({}, []),
+    },
+    {
+        "name": "fotos_recientes",
+        "description": "Últimas fotos de la obra con su descripción, opcionalmente de una tarea. Devuelve los "
+                       "id para mandarlas con enviar_fotos.",
+        "input_schema": _obj({
+            "id_tarea": {"type": "string", "description": "Vacío = todas las tareas"},
+            "cantidad": {"type": "integer", "description": "1 a 20; por defecto 8"},
+        }, []),
+    },
+    {
+        "name": "enviar_fotos",
+        "description": f"Le manda al usuario por el chat las fotos indicadas (hasta {MAX_FOTOS_POR_ENVIO}), "
+                       "después de tu respuesta.",
+        "input_schema": _obj({"foto_ids": {"type": "array", "items": {"type": "integer"}}}, ["foto_ids"]),
+    },
+    {
+        "name": "buscar_en_reportes",
+        "description": "Busca palabras en los reportes y notas de la obra (por ejemplo 'losa hormigonado' o "
+                       "'corralón'). Devuelve fechas y fragmentos.",
+        "input_schema": _obj({"texto": {"type": "string"}}, ["texto"]),
+    },
 ]
 
 
@@ -161,10 +217,189 @@ def _tarea_info(b: Borrador, t: cronograma.Tarea) -> dict:
     }
 
 
+# --- consultas sobre la obra ----------------------------------------------
+
+def _resumen_obra(b: Borrador) -> dict:
+    hoy = b.fecha
+    reales = db.ultimos_avances(b.obra.id, hoy.isoformat())
+    real, previsto = cronograma.avance_obra(b.obra.id, b.tareas, hoy)
+    atrasadas, sin_avance = [], []
+    for t in b.tareas.values():
+        prev = cronograma.pct_previsto(t, hoy)
+        if t.id in reales:
+            desvio = round(reales[t.id] - prev, 1)
+            if desvio <= -5:
+                atrasadas.append({"id_tarea": t.id, "tarea": t.nombre, "critica": t.critica,
+                                  "pct_real": reales[t.id], "pct_previsto": prev, "desvio": desvio})
+        elif t.inicio <= hoy <= t.fin:
+            sin_avance.append({"id_tarea": t.id, "tarea": t.nombre, "inicio": t.inicio.isoformat()})
+    atrasadas.sort(key=lambda a: (not a["critica"], a["desvio"]))
+
+    ultimos = [r for r in db.reportes_de_obra(b.obra.id, hoy.isoformat(), 2) if r["id"] != b.id]
+    alertas = cronograma.alertas_materiales(b.obra.id, b.tareas, hoy)
+    notas = db.notas_abiertas(b.obra.id)
+    return {
+        "obra": b.obra.nombre,
+        "fecha": hoy.isoformat(),
+        "avance_real_pct": real,
+        "avance_previsto_pct": previsto,
+        "tareas_atrasadas": atrasadas,
+        "tareas_en_curso_sin_avance_informado": sin_avance,
+        "en_curso": [_tarea_info(b, t) for t in cronograma.activas(b.tareas, hoy)],
+        "proximas_10_dias": [
+            {"id_tarea": t.id, "tarea": t.nombre, "inicio": t.inicio.isoformat(), "critica": t.critica}
+            for t in sorted(b.tareas.values(), key=lambda t: t.inicio)
+            if hoy < t.inicio <= hoy + timedelta(days=10)
+        ],
+        "ultimo_reporte": {"fecha": ultimos[0]["fecha"], "dt": ultimos[0]["dt_nombre"],
+                           "estado": ultimos[0]["estado"]} if ultimos else None,
+        "notas_abiertas": len(notas),
+        "notas_vencidas": sum(1 for n in notas if n["plazo"] and n["plazo"] < hoy.isoformat()),
+        "alertas_materiales": {nivel: sum(1 for a in alertas if a["nivel"] == nivel)
+                               for nivel in ("critico", "rojo", "amarillo")},
+    }
+
+
+def _ultimos_reportes(b: Borrador, cantidad: int) -> list[dict]:
+    filas = [r for r in db.reportes_de_obra(b.obra.id, b.fecha.isoformat(), cantidad + 1) if r["id"] != b.id]
+    res = []
+    for r in filas[:cantidad]:
+        d = json.loads(r["datos"])
+        res.append({
+            "fecha": r["fecha"], "numero": r["numero"], "dt": r["dt_nombre"], "estado": r["estado"],
+            "resumen": d.get("resumen", ""),
+            "jornada": d.get("jornada", {}),
+            "personal_total": sum(p.get("cantidad", 0) for p in d.get("personal", [])),
+            "avances": [{"tarea": a.get("tarea"), "pct_real": a.get("pct_real"), "desvio": a.get("desvio"),
+                         "descripcion": a.get("descripcion")} for a in d.get("avances", [])],
+            "faltantes_material": d.get("materiales", {}).get("faltantes", []),
+            "incidentes": d.get("hys", {}).get("incidentes", ""),
+        })
+    return res
+
+
+def _notas_abiertas(b: Borrador) -> list[dict]:
+    hoy = b.fecha.isoformat()
+    return [{
+        "tipo": n["tipo"], "numero": n["numero"], "fecha": n["fecha"], "emisor": n["emisor"],
+        "destinatario": n["destinatario"], "asunto": n["asunto"], "texto": n["texto"], "plazo": n["plazo"],
+        "vencida": bool(n["plazo"] and n["plazo"] < hoy), "impacto_materiales": bool(n["impacto_materiales"]),
+    } for n in db.notas_abiertas(b.obra.id)]
+
+
+def _pedidos_pendientes(b: Borrador) -> dict:
+    hoy = b.fecha.isoformat()
+
+    def fila(p):
+        t = b.tareas.get(p["id_tarea"])
+        return {"material": p["material"], "id_tarea": p["id_tarea"], "tarea": t.nombre if t else "",
+                "fecha_registro": p["fecha"], "fecha_entrega": p["fecha_entrega"],
+                "entrega_vencida": bool(p["fecha_entrega"] and p["fecha_entrega"] < hoy)}
+
+    return {
+        "pedidos_sin_recibir": [fila(p) for p in db.pedidos_de_obra(b.obra.id, ("pedido",))],
+        "marcados_pendientes": [fila(p) for p in db.pedidos_de_obra(b.obra.id, ("pendiente",))],
+        "a_pedir_segun_cronograma": cronograma.alertas_materiales(b.obra.id, b.tareas, b.fecha),
+    }
+
+
+def _fotos_recientes(b: Borrador, id_tarea: str | None, cantidad: int) -> list[dict]:
+    res = []
+    for f in db.fotos_de_obra(b.obra.id, id_tarea or None, cantidad):
+        t = b.tareas.get(f["id_tarea"] or "")
+        res.append({"foto_id": f["id"], "fecha": f["fecha"], "hora": f["hora"], "id_tarea": f["id_tarea"],
+                    "tarea": t.nombre if t else "", "descripcion": f["descripcion"], "dt": f["dt_nombre"]})
+    return res
+
+
+def _enviar_fotos(b: Borrador, foto_ids: list[int]) -> dict:
+    enviadas, no_encontradas = [], []
+    for fid in foto_ids[:MAX_FOTOS_POR_ENVIO]:
+        f = db.foto_de_obra(fid, b.obra.id)
+        if f and Path(f["path"]).exists():
+            b.salientes.append(Path(f["path"]))
+            enviadas.append(fid)
+        else:
+            no_encontradas.append(fid)
+    return {"se_envian_despues_de_tu_respuesta": enviadas, "no_encontradas": no_encontradas,
+            "omitidas_por_limite": foto_ids[MAX_FOTOS_POR_ENVIO:]}
+
+
+def _fragmentos(b: Borrador):
+    """(fecha, origen, texto) de todo lo escrito en reportes, fotos y notas de la obra."""
+    for r in db.reportes_de_obra(b.obra.id, b.fecha.isoformat(), 500):
+        d = json.loads(r["datos"])
+        origen = f"reporte de {r['dt_nombre']}"
+        if d.get("resumen"):
+            yield r["fecha"], origen, d["resumen"]
+        if d.get("jornada", {}).get("causa"):
+            yield r["fecha"], origen, f"Jornada {d['jornada'].get('tipo', '')}: {d['jornada']['causa']}"
+        for a in d.get("avances", []):
+            yield r["fecha"], origen, f"{a.get('tarea', '')}: {a.get('descripcion', '')} ({a.get('pct_real')}%)"
+        for tipo, items in d.get("materiales", {}).items():
+            for m in items:
+                yield r["fecha"], origen, (f"Material ({tipo}): {m.get('material')} {m.get('cantidad')} "
+                                           f"{m.get('unidad')} {m.get('proveedor', '')}")
+        for e in d.get("equipos", []):
+            yield r["fecha"], origen, f"Equipo: {e.get('equipo')} - {e.get('estado')}"
+        hys = d.get("hys", {})
+        for clave in ("visitas", "incidentes"):
+            if hys.get(clave):
+                yield r["fecha"], origen, f"HyS {clave}: {hys[clave]}"
+    for f in db.fotos_de_obra(b.obra.id, None, 500):
+        yield f["fecha"], f"foto #{f['id']}", f["descripcion"] or ""
+    for n in db.notas_de_obra(b.obra.id):
+        yield n["fecha"], f"{n['tipo']} N° {n['numero']} ({n['estado']})", f"{n['asunto']}: {n['texto']}"
+
+
+def _buscar_en_reportes(b: Borrador, texto: str) -> list[dict]:
+    palabras = set(cronograma.normalizar(texto))
+    if not palabras:
+        return []
+    encontrados = []
+    for fecha, origen, frag in _fragmentos(b):
+        n = len(palabras & set(cronograma.normalizar(frag)))
+        if n:
+            encontrados.append((n, fecha, origen, frag))
+    if not encontrados:
+        return []
+    # Solo los fragmentos con más palabras en común, del más nuevo al más viejo
+    mejor = max(e[0] for e in encontrados)
+    elegidos = sorted((e for e in encontrados if e[0] == mejor), key=lambda e: e[1], reverse=True)
+    return [{"fecha": f, "origen": o, "texto": t[:400]} for _, f, o, t in elegidos[:10]]
+
+
+def _consulta(b: Borrador, nombre: str, args: dict):
+    """Ejecuta una herramienta de consulta. Devuelve None si el nombre no es una consulta."""
+    if nombre == "resumen_obra":
+        return _resumen_obra(b)
+    if nombre == "ultimos_reportes":
+        return _ultimos_reportes(b, max(1, min(int(args.get("cantidad") or 5), 10)))
+    if nombre == "notas_abiertas":
+        return _notas_abiertas(b) or "No hay notas abiertas"
+    if nombre == "pedidos_pendientes":
+        return _pedidos_pendientes(b)
+    if nombre == "fotos_recientes":
+        return _fotos_recientes(b, args.get("id_tarea"), max(1, min(int(args.get("cantidad") or 8), 20))) \
+            or "No hay fotos"
+    if nombre == "enviar_fotos":
+        return _enviar_fotos(b, [int(i) for i in args["foto_ids"]])
+    if nombre == "buscar_en_reportes":
+        return _buscar_en_reportes(b, args["texto"]) or "Sin coincidencias"
+    return None
+
+
 def ejecutar(b: Borrador, nombre: str, args: dict) -> str:
     """Ejecuta una herramienta y devuelve el resultado como texto JSON."""
     d = b.datos
     hoy = b.fecha.isoformat()
+
+    if b.estado == "confirmado" and nombre not in PERMITIDAS_CONFIRMADO:
+        raise ValueError("El reporte de hoy ya está confirmado y no se puede modificar. "
+                         "Solo se pueden hacer consultas.")
+    consulta = _consulta(b, nombre, args)
+    if consulta is not None:
+        return json.dumps(consulta, ensure_ascii=False, default=str)
 
     if nombre == "consultar_cronograma":
         dia = date.fromisoformat(args["fecha"]) if args.get("fecha") else b.fecha

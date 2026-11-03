@@ -5,9 +5,11 @@ from contextlib import contextmanager
 
 from . import config
 
+# usuarios.usuario_id, reportes.dt_id y reportes.chat_id guardan el id del usuario en su canal:
+# el número de Telegram o "wa:<teléfono>" para WhatsApp.
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS usuarios (
-    telegram_id INTEGER PRIMARY KEY,
+    usuario_id TEXT PRIMARY KEY,
     nombre TEXT,
     chat_id INTEGER,
     obra_id TEXT,
@@ -71,30 +73,40 @@ def conexion():
 
 def inicializar():
     with conexion() as con:
+        columnas = [c["name"] for c in con.execute("PRAGMA table_info(usuarios)")]
+        if "telegram_id" in columnas:
+            # Bases anteriores a WhatsApp: la clave era un entero y no admite "wa:<teléfono>"
+            con.executescript(
+                "ALTER TABLE usuarios RENAME TO usuarios_telegram;"
+                "CREATE TABLE usuarios (usuario_id TEXT PRIMARY KEY, nombre TEXT, chat_id INTEGER,"
+                " obra_id TEXT, obra_fecha TEXT);"
+                "INSERT INTO usuarios SELECT telegram_id, nombre, chat_id, obra_id, obra_fecha FROM usuarios_telegram;"
+                "DROP TABLE usuarios_telegram;"
+            )
         con.executescript(ESQUEMA)
 
 
 # --- usuarios -------------------------------------------------------------
 
-def guardar_usuario(telegram_id: int, nombre: str, chat_id: int):
+def guardar_usuario(usuario_id, nombre: str, chat_id):
     with conexion() as con:
         con.execute(
-            "INSERT INTO usuarios (telegram_id, nombre, chat_id) VALUES (?, ?, ?) "
-            "ON CONFLICT(telegram_id) DO UPDATE SET nombre = excluded.nombre, chat_id = excluded.chat_id",
-            (telegram_id, nombre, chat_id),
+            "INSERT INTO usuarios (usuario_id, nombre, chat_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(usuario_id) DO UPDATE SET nombre = excluded.nombre, chat_id = excluded.chat_id",
+            (str(usuario_id), nombre, chat_id),
         )
 
 
-def obtener_usuario(telegram_id: int):
+def obtener_usuario(usuario_id):
     with conexion() as con:
-        return con.execute("SELECT * FROM usuarios WHERE telegram_id = ?", (telegram_id,)).fetchone()
+        return con.execute("SELECT * FROM usuarios WHERE usuario_id = ?", (str(usuario_id),)).fetchone()
 
 
-def fijar_obra(telegram_id: int, obra_id: str, fecha: str):
+def fijar_obra(usuario_id, obra_id: str, fecha: str):
     with conexion() as con:
         con.execute(
-            "UPDATE usuarios SET obra_id = ?, obra_fecha = ? WHERE telegram_id = ?",
-            (obra_id, fecha, telegram_id),
+            "UPDATE usuarios SET obra_id = ?, obra_fecha = ? WHERE usuario_id = ?",
+            (obra_id, fecha, str(usuario_id)),
         )
 
 
@@ -139,6 +151,15 @@ def borradores_abiertos(fecha: str):
         ).fetchall()
 
 
+def reportes_de_obra(obra_id: str, hasta_fecha: str, limite: int):
+    """Reportes de la obra hasta una fecha, del más nuevo al más viejo."""
+    with conexion() as con:
+        return con.execute(
+            "SELECT * FROM reportes WHERE obra_id = ? AND fecha <= ? ORDER BY fecha DESC, id DESC LIMIT ?",
+            (obra_id, hasta_fecha, limite),
+        ).fetchall()
+
+
 def siguiente_numero(obra_id: str) -> int:
     with conexion() as con:
         fila = con.execute(
@@ -172,6 +193,25 @@ def fotos_de_reporte(reporte_id):
         return con.execute(
             "SELECT * FROM fotos WHERE reporte_id = ? ORDER BY id", (reporte_id,)
         ).fetchall()
+
+
+def fotos_de_obra(obra_id: str, id_tarea: str | None, limite: int):
+    """Últimas fotos de la obra (opcionalmente de una tarea), con la fecha del reporte."""
+    filtro, params = ("AND f.id_tarea = ?", [id_tarea]) if id_tarea else ("", [])
+    with conexion() as con:
+        return con.execute(
+            "SELECT f.*, r.fecha, r.dt_nombre FROM fotos f JOIN reportes r ON r.id = f.reporte_id "
+            f"WHERE r.obra_id = ? {filtro} ORDER BY r.fecha DESC, f.id DESC LIMIT ?",
+            [obra_id, *params, limite],
+        ).fetchall()
+
+
+def foto_de_obra(foto_id: int, obra_id: str):
+    with conexion() as con:
+        return con.execute(
+            "SELECT f.* FROM fotos f JOIN reportes r ON r.id = f.reporte_id WHERE f.id = ? AND r.obra_id = ?",
+            (foto_id, obra_id),
+        ).fetchone()
 
 
 # --- avances, stock y pedidos ---------------------------------------------
@@ -226,6 +266,15 @@ def obtener_pedido(obra_id, id_tarea, material):
         ).fetchone()
 
 
+def pedidos_de_obra(obra_id: str, estados: tuple[str, ...]):
+    marcas = ", ".join("?" * len(estados))
+    with conexion() as con:
+        return con.execute(
+            f"SELECT * FROM pedidos WHERE obra_id = ? AND estado IN ({marcas}) ORDER BY fecha",
+            (obra_id, *estados),
+        ).fetchall()
+
+
 # --- notas de obra --------------------------------------------------------
 
 def crear_nota(obra_id, tipo, fecha, emisor, destinatario, asunto, texto, plazo,
@@ -250,6 +299,11 @@ def notas_abiertas(obra_id):
             "SELECT * FROM notas WHERE obra_id = ? AND estado = 'pendiente' ORDER BY fecha, id",
             (obra_id,),
         ).fetchall()
+
+
+def notas_de_obra(obra_id):
+    with conexion() as con:
+        return con.execute("SELECT * FROM notas WHERE obra_id = ? ORDER BY fecha, id", (obra_id,)).fetchall()
 
 
 def notas_de_reporte(reporte_id):

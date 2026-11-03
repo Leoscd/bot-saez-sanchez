@@ -7,5 +7,6 @@ fpdf2
 openpyxl
 pillow
 tzdata
+aiohttp>=3.9
 # Opcional: transcripción local sin API (TRANSCRIPCION=local). Pesado para un VPS chico.
 # faster-whisper

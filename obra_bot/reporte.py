@@ -1,7 +1,8 @@
 """Borrador del reporte diario: estado, campos faltantes, confirmación y salidas."""
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 
 from . import config, cronograma, db, obras, salidas
 
@@ -33,6 +34,8 @@ class Borrador:
     numero: int | None
     datos: dict
     historial: list
+    # Fotos que el asistente pidió mandarle al usuario en este turno (no se guardan)
+    salientes: list[Path] = field(default_factory=list)
 
     @classmethod
     def desde_fila(cls, fila) -> "Borrador":
@@ -64,6 +67,14 @@ def obtener_o_crear(obra: obras.Obra, fecha: date, dt_id: int, dt_nombre: str,
         return Borrador.desde_fila(fila), False
     rid = db.crear_reporte(obra.id, fecha.isoformat(), dt_id, dt_nombre, chat_id, datos_iniciales())
     return Borrador.desde_fila(db.obtener_reporte_por_id(rid)), True
+
+
+def tiene_datos(b: Borrador) -> bool:
+    """True si el DT cargó algo del reporte. Un borrador con solo consultas no tiene datos."""
+    d = b.datos
+    return bool(d["jornada"] or d["personal"] or d["avances"] or d["hys"] or d["equipos"]
+                or any(d["materiales"].values()) or d["condiciones"].get("confirmado")
+                or db.fotos_de_reporte(b.id) or db.notas_de_reporte(b.id))
 
 
 def faltantes(b: Borrador) -> list[str]:
@@ -111,7 +122,8 @@ def confirmar(b: Borrador):
     b.datos["proximos"] = proximos_pasos(b)
 
     pdf_path = salidas.generar_pdf(b)
-    b.datos["pdf"] = str(pdf_path.relative_to(config.BASE_DIR))
+    b.datos["pdf"] = str(pdf_path.relative_to(config.BASE_DIR) if pdf_path.is_relative_to(config.BASE_DIR)
+                         else pdf_path)
     salidas.agregar_a_planilla(b)
     b.guardar()
     return pdf_path
