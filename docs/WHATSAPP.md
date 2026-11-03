@@ -49,7 +49,8 @@ adduser --system --group --home /opt/obra-bot obrabot
 git clone https://github.com/Leoscd/bot-saez-sanchez.git /opt/obra-bot
 cd /opt/obra-bot
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env && nano .env        # OPENAI_API_KEY y las variables WHATSAPP_*
+cp .env.example .env && nano .env        # variables WHATSAPP_* (ID del número, token de verificación)
+.venv/bin/python scripts/claves.py       # pega las claves sin mostrarlas: OpenAI, token y clave secreta
 .venv/bin/python scripts/seed_demo.py --historial   # obras demo; para obras reales, data/obras.json
 chown -R obrabot:obrabot /opt/obra-bot
 cp deploy/obra-bot-whatsapp.service /etc/systemd/system/
