@@ -38,7 +38,8 @@ def whatsapp():
     from obra_bot.whatsapp_bot import crear_app
     logging.info("Bot de WhatsApp en el puerto %s, ruta %s, %d personas habilitadas.",
                  config.WHATSAPP_PUERTO, config.WHATSAPP_RUTA, len(personas))
-    web.run_app(crear_app(), host="127.0.0.1", port=config.WHATSAPP_PUERTO, print=None)
+    # Sin registro de accesos: la verificación de Meta trae el token en la URL
+    web.run_app(crear_app(), host="127.0.0.1", port=config.WHATSAPP_PUERTO, print=None, access_log=None)
 
 
 def main():
